@@ -5,13 +5,13 @@
 
 using namespace std;
 
-typedef std::set<int> Set;
+typedef std::set<string> Set;
 typedef std::vector<int> Vector;
 
 
-int encode(Vector partial, int q) {
-	int b = 0;
-	for (int i=0; i<partial.size(); i++) b = b*10 + partial[i];
+string encode(Vector partial) {
+	string b = "";
+	for (int k : partial) b = b + std::to_string(k);
 
 	return b;
 }
@@ -26,7 +26,7 @@ Set colorings(Vector partial, Vector counts, Vector Q, int q) {
 	for (int i=0; i<q; i++) equality &= counts[i] == Q[i];
 
 	if (equality) {
-		include.insert(encode(partial, q));
+		include.insert(encode(partial));
 		return include;
 	}
 
