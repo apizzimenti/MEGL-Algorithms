@@ -53,17 +53,23 @@ Set colorings(Vector partial, Vector counts, Vector Q, int q) {
 	return include;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+	std::vector<string> args(argv+1, argv+argc);
+
+	Vector Q = Vector();
+	for (auto str : args) Q.push_back(std::stoi(str));
+	
 	Vector partial = Vector();
-	Vector counts = {0,0,0};
-	Vector Q = {1,4,4};
-	int q = 3;
+	int q = Q.size();
+	Vector counts = Vector(q, 0);
 
 	Set colors = colorings(partial, counts, Q, q);
 
 	for (auto it : colors) {
 		std::cout << it << std::endl;
 	}
+
+	std::cout << colors.size() << std::endl;
 
 	return 0;
 }

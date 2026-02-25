@@ -37,7 +37,8 @@ N = 10
 assert sum(Q) == N
 
 # Compute the different colorings and assert we have the right number of them.
-S = digits([], (0,0,0), Q)
-should = multi(Q)
+# S = digits([], (0,0,0), Q)
+should = multi((2,3,4))
+print(should)
 
-assert len(S) == should
+# assert len(S) == should
