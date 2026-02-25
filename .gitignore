@@ -1,0 +1,97 @@
+# -----------------------------
+# macOS
+# -----------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Type checking / linting
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+.ipython/
+profile_default/
+
+# Logs
+*.log
+
+# -----------------------------
+# C / C++
+# -----------------------------
+# Compiled objects and libs
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Dependency files
+*.d
+
+# Build directories (common)
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+install_manifest.txt
+
+# -----------------------------
+# IDEs / editors
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# Misc
+# -----------------------------
+.DS_Store?
+Thumbs.db
