@@ -1,11 +1,12 @@
 
 #include <iostream>
+#include <format>
 #include <gmpxx.h>
 
 using namespace std;
 
 void _print(vector<int> v) {
-	for (int k : v) cout << k << " ";
+	for (int k : v) cout << k << ",";
 }
 
 mpz_class factorial(int n) {
@@ -73,23 +74,29 @@ int main(int argc, char *argv[]) {
 	// Find all the possible demographies.
 	int N = atoi(argv[1]);
 	int q = atoi(argv[2]);
-	mpz_class total(0);
+
+	// Time stuff.
+	auto start = chrono::steady_clock::now();
 
 	vector<vector<int>> dems = demographies(N, q);
+	vector<mpz_class> counts = vector<mpz_class>(dems.size());
 
-	// For each demography, count the number of colorings.
-	for (auto demo : dems) {
-		mpz_class N = factorial(sum(demo));
-		mpz_class M = prod(demo);
-		mpz_class P = N/M;
-		total = total + P;
-
-		_print(demo);
-		cout << "--> " << P.get_str() << endl;
+	for (int i=0; i<dems.size(); i++) {
+		mpz_class N = factorial(sum(dems[i]));
+		mpz_class M = prod(dems[i]);
+		counts[i] = N/M;
 	}
 
-	cout << "--------------------" << endl;
-	cout << dems.size() << " demographies, " << total.get_str() << " colorings" << endl;
+	auto stop = chrono::steady_clock::now();
+	chrono::duration<double, std::milli> diff = stop-start;
+	cerr << std::format("completed {} vertices in ", N) << diff.count()/1000 << "s" << endl;
+
+	for (int i=0; i<dems.size(); i++) {
+		auto demo = dems[i];
+		auto count = counts[i];
+		_print(demo);
+		cout << count.get_str() << endl;
+	}
 
 	return 0;
 }
