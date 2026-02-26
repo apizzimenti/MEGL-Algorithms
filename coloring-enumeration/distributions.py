@@ -20,12 +20,12 @@ for f in os.listdir("./data"):
 	fig = plt.figure()
 	ax = fig.add_subplot(projection="3d")
 
-	ax.scatter(data["x1"], data["x2"], data["x3"], c=plasma(data["COUNT"]), alpha=1)
+	ax.scatter(data["x1"], data["x2"], data["x3"], c=plasma(data["COUNT"]), alpha=1, marker="h", s=plt.rcParams["lines.markersize"]**2+1)
 	ax.view_init(elev=35, azim=45, roll=0)
 
-	# ax.set_xticklabels([])
-	# ax.set_yticklabels([])
-	# ax.set_zticklabels([])
+	ax.set_xticklabels([])
+	ax.set_yticklabels([])
+	ax.set_zticklabels([])
 
 	plt.savefig(f"figures/{N}.{q}.jpeg", dpi=600, bbox_inches="tight")
 	# plt.show()
