@@ -1,13 +1,13 @@
 
-FORCE:
-
-
 build: FORCE
 	@mkdir -p build
 
-enumerate: FORCE
+enumerate: FORCE build
 	clang++ -Wall enumerate.cpp -o build/enumerate
 
-count: FORCE
+count: FORCE build
 	clang++ -Wall -std=c++20 count.cpp -o build/count `pkgconf --libs --cflags gmp`
+
+
+FORCE:
 

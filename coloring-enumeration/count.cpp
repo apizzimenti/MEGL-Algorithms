@@ -52,8 +52,7 @@ void _demographies(vector<int> partial, int N, int q, int leftover, int cursor, 
 }
 
 
-// Get the entire collection of q-demographies summing to N. (Currently only works
-// for q=3, but we'll generalize later.)
+// Get the entire collection of q-demographies summing to N.
 vector<vector<int>> demographies(int N, int q) {
 	vector<vector<int>> demographics;
 
@@ -99,7 +98,9 @@ int main(int argc, char *argv[]) {
 	}
 
 	chrono::duration<double, std::milli> diff = stop-start;
-	cerr << std::format("computed {} demographies and {} colorings on {} vertices in ", dems.size(), total.get_str(), N) << diff.count()/1000 << "s" << endl;
+	cerr << endl;
+	cerr << std::format(">>> computed {} demographies and {} colorings on {} vertices in ", dems.size(), total.get_str(), N)
+		<< diff.count()/1000 << "s" << endl;
 
 	return 0;
 }

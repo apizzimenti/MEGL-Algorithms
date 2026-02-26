@@ -6,6 +6,8 @@ import os
 plasma = plt.colormaps["plasma"]
 
 for f in os.listdir("./data"):
+	if "csv" not in f: continue;
+	
 	# Some basic data-munging.
 	N, q = [int(z) if "csv" not in z else None for z in f.split(".")][:2]
 	data = pd.read_csv(f"./data/{f}", header=None)
