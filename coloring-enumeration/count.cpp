@@ -74,6 +74,7 @@ int main(int argc, char *argv[]) {
 	// Find all the possible demographies.
 	int N = atoi(argv[1]);
 	int q = atoi(argv[2]);
+	mpz_class total(0);
 
 	// Time stuff.
 	auto start = chrono::steady_clock::now();
@@ -85,11 +86,10 @@ int main(int argc, char *argv[]) {
 		mpz_class N = factorial(sum(dems[i]));
 		mpz_class M = prod(dems[i]);
 		counts[i] = N/M;
+		total = total + counts[i];
 	}
 
 	auto stop = chrono::steady_clock::now();
-	chrono::duration<double, std::milli> diff = stop-start;
-	cerr << std::format("completed {} vertices in ", N) << diff.count()/1000 << "s" << endl;
 
 	for (int i=0; i<dems.size(); i++) {
 		auto demo = dems[i];
@@ -97,6 +97,9 @@ int main(int argc, char *argv[]) {
 		_print(demo);
 		cout << count.get_str() << endl;
 	}
+
+	chrono::duration<double, std::milli> diff = stop-start;
+	cerr << std::format("computed {} demographies and {} colorings on {} vertices in ", dems.size(), total.get_str(), N) << diff.count()/1000 << "s" << endl;
 
 	return 0;
 }

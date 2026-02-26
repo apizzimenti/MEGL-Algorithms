@@ -1,7 +1,12 @@
 .ipynb_checkpoints
 .vscode
 
-.DS_Store
+*.DS_Store
 
 # Specific to sub-projects...
-coloring-enumeration/data/*
+coloring-enumeration/data/*.csv
+coloring-enumeration/figures/*.jpeg
+
+coloring-enumeration/build
+*.o
+*.so
