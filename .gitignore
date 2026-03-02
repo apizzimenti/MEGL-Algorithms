@@ -10,3 +10,4 @@ coloring-enumeration/figures/*.jpeg
 coloring-enumeration/build
 *.o
 *.so
+*.csv
