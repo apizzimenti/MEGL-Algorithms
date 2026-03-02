@@ -10,6 +10,8 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <limits>
+#include <stdexcept>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -28,9 +30,19 @@ struct Params {
     // agent is happy if same-type-neighbors fraction >= tau
     double tau = 1.0/3.0;
 
-    // Dynamics
-    bool random_agent_order = true;
-    int max_steps = 200000;
+    // Proposal parameter:
+    // source agent i is selected with weight exp(lambda_prop * H_i),
+    // where H_i = number of unlike occupied neighbors
+    double lambda_prop = 1.0;
+
+    // Target distribution parameter:
+    // pi(x) proportional to exp(beta_target * target_score(x))
+    double beta_target = 4.0;
+
+    // Make the chain explicitly lazy => guarantees aperiodicity
+    double lazy_prob = 0.05;
+    //
+    int max_steps = 1000;
 
     // Experiment
     int repetitions = 2000;
@@ -38,21 +50,20 @@ struct Params {
 
 };
 
+// Per-run output for one H-step MH trajectory
 struct RunStats {
-    bool absorbed_by_H = false; // indicator {T_abs <= H}
-    int T_abs = -1; // exact absorption time (number of steps until absorption, or -1 if not absorbed)
-    int tau_H = 0; // min(T_abs, H)
-    double S_stop_H = 0.0; // segregation index at time tau_H
+    int H = 0;
+    int accepted_moves = 0;
+    double initial_score = 0.0;
+    double final_score = 0.0;
 };
 
+// Aggregated Monte Carlo output
 struct AggregateStats {
     long long total_runs = 0;
-    
-    // During accumulation these are sums;
-    // after finalize_aggregate() they become means.
-    double p_abs_H = 0.0;
-    double tau_H = 0.0;
-    double s_H = 0.0;
+    double mean_initial_score = 0.0;
+    double mean_final_score = 0.0;
+    double mean_accept_rate = 0.0;
 };
 
 // Grid indexing and neighbor calculations
@@ -117,11 +128,6 @@ double local_same_fraction(const Grid & G, const std::vector<uint8_t> & state, i
     return static_cast<double>(same) / occupied_neighbors;
 }
 
-bool is_happy(const Grid & G, const std::vector<uint8_t> & state, int idx, double tau) {
-    if (state[idx] == 0) return true; // vacancy is always "happy"
-    return local_same_fraction(G, state, idx) >= tau;
-}
-
 double mean_satisfaction(const Grid & G, const std::vector<uint8_t> & state) {
     double total = 0.0;
     int occupied = 0;
@@ -137,6 +143,27 @@ double segregation_score(const Grid & G, const std::vector<uint8_t> & state) {
     return mean_satisfaction(G, state);
 }
 
+int unlike_neighbor_count(const Grid& G, const std::vector<uint8_t>& state, int idx) {
+    uint8_t t = state[idx];
+    if (t == 0) return 0;
+
+    int count = 0;
+    for (int nb : G.nbrs[idx]) {
+        if (state[nb] == 0) continue;      // ignore vacancies
+        if (state[nb] != t) ++count;       // count unlike occupied neighbors
+    }
+    return count;
+}
+
+double target_score(const Grid& G, const std::vector<uint8_t>& state) {
+    double total = 0.0;
+    for (int i = 0; i < G.N; ++i) {
+        if (state[i] == 0) continue;
+        total += local_same_fraction(G, state, i);
+    }
+    return total;
+}
+
 // Random fixed-count initialization
 std::vector<uint8_t> random_initial_state(const Params & P, std::mt19937 & rng) {
     Counts C = proportions_to_counts(P);
@@ -150,6 +177,34 @@ std::vector<uint8_t> random_initial_state(const Params & P, std::mt19937 & rng) 
     return state;
 }
 
+std::vector<int> occupied_positions(const std::vector<uint8_t>& state) {
+    std::vector<int> occ;
+    occ.reserve(state.size());
+    for (int i = 0; i < (int)state.size(); ++i) {
+        if (state[i] != 0) occ.push_back(i);
+    }
+    return occ;
+}
+
+double source_weight_at(const Grid& G,
+                        const std::vector<uint8_t>& state,
+                        int idx,
+                        const Params& P) {
+    int H_i = unlike_neighbor_count(G, state, idx);
+    return std::exp(P.lambda_prop * static_cast<double>(H_i));
+}
+
+double total_source_weight(const Grid& G,
+                           const std::vector<uint8_t>& state,
+                           const Params& P) {
+    double total = 0.0;
+    for (int i = 0; i < G.N; ++i) {
+        if (state[i] == 0) continue;
+        total += source_weight_at(G, state, i, P);
+    }
+    return total;
+}
+
 // Used for choosing the nearest satisfaction vacancy
 int manhattan_distance(const Grid& G, int u, int v) {
     int ur = u / G.cols, uc = u % G.cols;
@@ -158,121 +213,127 @@ int manhattan_distance(const Grid& G, int u, int v) {
 }
 
 // One Schelling
-bool do_one_step(const Grid& G, std::vector<uint8_t> & state, const Params& P, std::mt19937& rng) {
-    std::vector<int> unhappy_agents;
-    std::vector<int> vacancies;
-
-    unhappy_agents.reserve(G.N);
-    vacancies.reserve(G.N);
-
-    for (int i=0; i < G.N; ++i) {
-        if (state[i] == 0) {
-            vacancies.push_back(i);
-        } else if (!is_happy(G, state, i, P.tau)) {
-            unhappy_agents.push_back(i);
+bool mh_one_step(const Grid& G,
+                 std::vector<uint8_t>& state,
+                 const Params& P,
+                 std::mt19937& rng) {
+    // Explicit laziness => guarantees aperiodicity
+    {
+        std::uniform_real_distribution<double> unif01(0.0, 1.0);
+        if (unif01(rng) < P.lazy_prob) {
+            return false; // stayed put
         }
     }
-    if (unhappy_agents.empty()) return false; // already absorbed
-    if (vacancies.empty()) return false; // no place to move
 
-    if (P.random_agent_order) {
-        std::shuffle(unhappy_agents.begin(), unhappy_agents.end(), rng);
+    // List occupied positions
+    std::vector<int> occ = occupied_positions(state);
+    if (occ.empty()) {
+        return false; // all vacancies => singleton state
     }
-    for (int agent_idx : unhappy_agents) {
-        int best_dist = std::numeric_limits<int>::max();
-        std::vector<int> best_vacancies;
-        best_vacancies.reserve(8);
 
-        for (int v : vacancies) {
-            // try move agent to vacancy v
-            std::swap(state[agent_idx], state[v]);
-            bool satisfactory = is_happy(G, state, v, P.tau);
-            std::swap(state[agent_idx], state[v]); // swap back
-
-            if (!satisfactory) continue;
-            int d = manhattan_distance(G, agent_idx, v);
-            if (d < best_dist) {
-                best_dist = d;
-                best_vacancies.clear();
-                best_vacancies.push_back(v);
-            } else if (d == best_dist) {
-                best_vacancies.push_back(v);
-            }
-        }
-        if (!best_vacancies.empty()) {
-            std::uniform_int_distribution<int> dist(0, static_cast<int>(best_vacancies.size()) - 1);
-            int chosen_v = best_vacancies[dist(rng)];
-            std::swap(state[agent_idx], state[chosen_v]);
-            return true; // one move made
-        }
+    // Build source weights
+    std::vector<double> src_weights;
+    src_weights.reserve(occ.size());
+    for (int idx : occ) {
+        src_weights.push_back(source_weight_at(G, state, idx, P));
     }
-    return false; // no unhappy agent found any legal improving move
+
+    double W_x = std::accumulate(src_weights.begin(), src_weights.end(), 0.0);
+    if (W_x <= 0.0) return false;
+
+    // Choose source i with probability proportional to exp(lambda * H_i)
+    std::discrete_distribution<int> src_dist(src_weights.begin(), src_weights.end());
+    int src_pos_in_occ = src_dist(rng);
+    int i = occ[src_pos_in_occ];
+    uint8_t src_label = state[i];
+
+    // Choose random destination j with different label from source label.
+    // This preserves the counts after swap and ensures a real proposed move.
+    std::vector<int> destinations;
+    destinations.reserve(G.N);
+    for (int j = 0; j < G.N; ++j) {
+        if (j == i) continue;
+        if (state[j] != src_label) destinations.push_back(j);
+    }
+
+    if (destinations.empty()) {
+        return false; // degenerate singleton-type state
+    }
+
+    std::uniform_int_distribution<int> dst_dist(0, (int)destinations.size() - 1);
+    int j = destinations[dst_dist(rng)];
+
+    // Current quantities
+    double score_x = target_score(G, state);
+    double w_forward = src_weights[src_pos_in_occ];
+
+    // Proposed state y: swap i and j
+    std::vector<uint8_t> proposal = state;
+    std::swap(proposal[i], proposal[j]);
+
+    // Compute reverse proposal quantities in y
+    // Reverse move selects the same agent label now sitting at j, then swaps back to i.
+    double score_y = target_score(G, proposal);
+    double W_y = total_source_weight(G, proposal, P);
+    double w_reverse = source_weight_at(G, proposal, j, P);
+
+    // Target density ratio:
+    // pi(y)/pi(x) = exp(beta * (score_y - score_x))
+    double log_pi_ratio = P.beta_target * (score_y - score_x);
+
+    // Proposal ratio:
+    // q(y|x) = [w_forward / W_x] * [1 / (# positions with label != src_label)]
+    // q(x|y) = [w_reverse / W_y] * [1 / (# positions with label != src_label)]
+    // destination-count factors cancel because label counts are preserved
+    double log_q_ratio = std::log(w_reverse) - std::log(W_y)
+                       - std::log(w_forward) + std::log(W_x);
+
+    double log_accept_ratio = log_pi_ratio + log_q_ratio;
+
+    std::uniform_real_distribution<double> unif01(0.0, 1.0);
+    double u = unif01(rng);
+
+    if (log_accept_ratio >= 0.0 || std::log(u) < log_accept_ratio) {
+        state.swap(proposal);
+        return true; // accepted
+    } else {
+        return false; // rejected => self-loop
+    }
 }
 
-bool is_absorbing_state(const Grid& G,
-                        const std::vector<uint8_t>& state,
-                        const Params& P) {
-    std::vector<uint8_t> probe = state;
-    std::mt19937 dummy_rng(123456789); // deterministic probe RNG
-    return !do_one_step(G, probe, P, dummy_rng);
-}
-// Main simulation loop for one run, with cycle detection
+// Main simulation loop for one run
 RunStats simulate_one(const Grid& G,
                       std::vector<uint8_t> state,
                       const Params& P,
                       std::mt19937& rng) {
     RunStats R;
-    const int H = P.max_steps;
+    R.H = P.max_steps;
+    R.initial_score = segregation_score(G, state);
 
-    // Interpretation:
-    // X_0 = initial state
-    // after 1 successful move -> X_1
-    // after 2 successful moves -> X_2
-    // ...
-    // after k successful moves -> X_k
-
-    for (int t = 0; t < H; ++t) {
-        bool moved = do_one_step(G, state, P, rng);
-
-        if (!moved) {
-            // Current state is absorbing, so T_abs = t
-            R.absorbed_by_H = true;
-            R.T_abs = t;
-            R.tau_H = t;
-            R.S_stop_H = segregation_score(G, state);
-            return R;
-        }
+    int accepts = 0;
+    for (int t = 0; t < P.max_steps; ++t) {
+        bool accepted = mh_one_step(G, state, P, rng);
+        if (accepted) ++accepts;
     }
 
-    // We have simulated exactly up to X_H.
-    // Need to check whether absorption occurs exactly at time H.
-    if (is_absorbing_state(G, state, P)) {
-        R.absorbed_by_H = true;
-        R.T_abs = H;
-    } else {
-        R.absorbed_by_H = false;
-        R.T_abs = -1; // means T_abs > H in the truncated sense
-    }
-
-    R.tau_H = H;
-    R.S_stop_H = segregation_score(G, state);
+    R.accepted_moves = accepts;
+    R.final_score = segregation_score(G, state);
     return R;
 }
 
 void add_run(AggregateStats& A, const RunStats& R) {
     ++A.total_runs;
-    A.p_abs_H += (R.absorbed_by_H ? 1.0 : 0.0);
-    A.tau_H += static_cast<double>(R.tau_H);
-    A.s_H += R.S_stop_H;
+    A.mean_initial_score += R.initial_score;
+    A.mean_final_score += R.final_score;
+    A.mean_accept_rate += static_cast<double>(R.accepted_moves) / std::max(1, R.H);
 }
 
 void finalize_aggregate(AggregateStats& A) {
     if (A.total_runs == 0) return;
-    A.p_abs_H /= A.total_runs;
-    A.tau_H   /= A.total_runs;
-    A.s_H     /= A.total_runs;
+    A.mean_initial_score /= A.total_runs;
+    A.mean_final_score /= A.total_runs;
+    A.mean_accept_rate /= A.total_runs;
 }
-
 
 // Parameter point in the phase sweep
 AggregateStats run_experiment_at_fraction(Params P) {
@@ -293,6 +354,9 @@ AggregateStats run_experiment_at_fraction(Params P) {
             + static_cast<int>(1000 * P.a_frac)
             + static_cast<int>(10000 * P.vacancy_frac)
             + static_cast<int>(P.rows * 1000 + P.cols)
+            + static_cast<int>(100 * P.lambda_prop)
+            + static_cast<int>(100 * P.beta_target)
+            + P.max_steps
         );
 
         AggregateStats local;
@@ -307,9 +371,9 @@ AggregateStats run_experiment_at_fraction(Params P) {
         #pragma omp critical
         {
             total.total_runs += local.total_runs;
-            total.p_abs_H += local.p_abs_H;
-            total.tau_H += local.tau_H;
-            total.s_H += local.s_H;
+            total.mean_initial_score += local.mean_initial_score;
+            total.mean_final_score += local.mean_final_score;
+            total.mean_accept_rate += local.mean_accept_rate;
         }
     }
 
@@ -330,17 +394,25 @@ int main() {
     P.rows = 20;
     P.cols = 20;
     P.N = P.rows * P.cols;
+
     P.vacancy_frac = 0.1;
-    P.tau = 1.0 / 3.0;
-    P.repetitions = 2000;
+    P.a_frac = 0.45;
+
+    P.lambda_prop = 1.0;
+    P.beta_target = 4.0;
+    P.lazy_prob = 0.05;
+
+    P.repetitions = 500;
 
     auto horizon_ks = make_horizon_multipliers();
 
     auto program_start = std::chrono::steady_clock::now();
     long long total_simulation_runs = 0;
 
-    std::ofstream fout("phase_sweep.csv");
-    fout << "row,col,N,a_frac,b_frac,vacancy_frac,k,H,p_abs_H,tau_H,s_H\n";
+    std::ofstream fout("mh_schelling_phase_sweep.csv");
+    fout << "row,col,N,a_frac,b_frac,vacancy_frac,"
+            "lambda_prop,beta_target,lazy_prob,"
+            "k,H,mean_initial_score,mean_final_score,mean_accept_rate\n";
 
     for (int row = 3; row <= 20; ++row) {
         for (int col = row; col <= 20; ++col) {
@@ -366,9 +438,8 @@ int main() {
 
                     double b = 1.0 - P.vacancy_frac - P.a_frac;
 
-                    // New sweep over k, where H = ceil(kN)
                     for (double k : horizon_ks) {
-                        P.max_steps = std::max(1, static_cast<int>(std::ceil(k * P.N)));
+                        P.max_steps = std::max(1, (int)std::ceil(k * P.N));
 
                         AggregateStats A = run_experiment_at_fraction(P);
                         total_simulation_runs += A.total_runs;
@@ -381,9 +452,9 @@ int main() {
                                   << " vacancy_frac=" << P.vacancy_frac
                                   << " k=" << k
                                   << " H=" << P.max_steps
-                                  << " p_abs_H=" << A.p_abs_H
-                                  << " tau_H=" << A.tau_H
-                                  << " s_H=" << A.s_H
+                                  << " mean_initial_score=" << A.mean_initial_score
+                                  << " mean_final_score=" << A.mean_final_score
+                                  << " mean_accept_rate=" << A.mean_accept_rate
                                   << "\n";
 
                         fout << row << ","
@@ -392,11 +463,14 @@ int main() {
                              << a << ","
                              << b << ","
                              << P.vacancy_frac << ","
+                             << P.lambda_prop << ","
+                             << P.beta_target << ","
+                             << P.lazy_prob << ","
                              << k << ","
                              << P.max_steps << ","
-                             << A.p_abs_H << ","
-                             << A.tau_H << ","
-                             << A.s_H << "\n";
+                             << A.mean_initial_score << ","
+                             << A.mean_final_score << ","
+                             << A.mean_accept_rate << "\n";
                     }
                 }
             }
@@ -422,4 +496,4 @@ int main() {
 }
 
 // Compile command
-// g++ -O3 -march=native -fopenmp -std=c++17 schelling_phase.cpp -o schelling_phase
+// g++-15 -O3 -march=native -fopenmp -std=c++17 mh_phase.cpp -o mh_phase
