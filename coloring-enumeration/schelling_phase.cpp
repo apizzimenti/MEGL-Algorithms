@@ -30,50 +30,54 @@ struct Params {
 
     // Dynamics
     bool random_agent_order = true;
+
+    //
     int max_steps = 200000;
 
     // Experiment
     int repetitions = 2000;
     int seed = 42;
 
-    // Diagnostics for "works well"
-    int min_good_steps = 50;
-    double min_good_segregation = 0.75;
 };
 
 struct RunStats {
-    bool absorbed = false;
-    bool cycle_detected = false;
-    int steps = 0;
-    double initial_satisfaction = 0.0;
-    double final_satisfaction = 0.0;
-    double initial_segregation = 0.0;
-    double final_segregation = 0.0;
+    bool absorbed_by_H = false; // indicator {T_abs <= H}
+    int T_abs = -1; // exact absorption time (number of steps until absorption, or -1 if not absorbed)
+    int tau_H = 0; // min(T_abs, H)
+    double S_stop_H = 0.0; // segregation index at time tau_H
 };
 
 struct AggregateStats {
     long long total_runs = 0;
-    long long absorbed_runs = 0;
-    long long cycle_runs = 0;
-    long long good_runs = 0;
-    double mean_steps = 0.0;
-    double mean_final_satisfaction = 0.0;
-    double mean_final_segregation = 0.0;
+    
+    // During accumulation these are sums;
+    // after finalize_aggregate() they become means.
+    double p_abs_H = 0.0;
+    double tau_H = 0.0;
+    double s_H = 0.0;
 };
 
 // Grid indexing and neighbor calculations
 struct Grid {
     int rows, cols, N;
-    std::vector<std::vector<int>> nbrs; // neighbors for each cell
+    std::vector<std::vector<int>> nbrs;
 
-    Grid(int r, int c) : rows(r), cols(c), N(r*c), nbrs(r*c) {
+    Grid(int r, int c) : rows(r), cols(c), N(r * c), nbrs(r * c) {
         for (int i = 0; i < rows; ++i) {
             for (int j = 0; j < cols; ++j) {
                 int id = i * cols + j;
-                if (i > 0) nbrs[id].push_back((i-1)*cols + j); // up
-                if (i < rows-1) nbrs[id].push_back((i+1)*cols + j); // down
-                if (j > 0) nbrs[id].push_back(i*cols + (j-1)); // left
-                if (j < cols-1) nbrs[id].push_back(i*cols + (j+1)); // right
+
+                // 8-neighbor neighborhood
+                for (int di = -1; di <= 1; ++di) {
+                    for (int dj = -1; dj <= 1; ++dj) {
+                        if (di == 0 && dj == 0) continue;
+                        int ni = i + di;
+                        int nj = j + dj;
+                        if (0 <= ni && ni < rows && 0 <= nj && nj < cols) {
+                            nbrs[id].push_back(ni * cols + nj);
+                        }
+                    }
+                }
             }
         }
     }
@@ -131,7 +135,7 @@ double mean_satisfaction(const Grid & G, const std::vector<uint8_t> & state) {
     return occupied ? total /occupied : 0.0; // if no occupied cells, consider fully satisfied
 }
 
-double segregation_index(const Grid & G, const std::vector<uint8_t> & state) {
+double segregation_score(const Grid & G, const std::vector<uint8_t> & state) {
     return mean_satisfaction(G, state);
 }
 
@@ -148,14 +152,11 @@ std::vector<uint8_t> random_initial_state(const Params & P, std::mt19937 & rng) 
     return state;
 }
 
-// Hashing states for cycle detection
-uint64_t hash_state(const std::vector<uint8_t> & state) {
-    uint64_t h = 1099511628211ULL; // FNV-1a 64-bit offset basis
-    for (uint8_t x : state) {
-        h ^= static_cast<uint64_t>(x + 1); // +1 to avoid zero values
-        h *= 1099511628211ULL; // FNV-1a prime
-    }
-    return h;
+// Used for choosing the nearest satisfaction vacancy
+int manhattan_distance(const Grid& G, int u, int v) {
+    int ur = u / G.cols, uc = u % G.cols;
+    int vr = v / G.cols, vc = v % G.cols;
+    return std::abs(ur - vr) + std::abs(uc - vc);
 }
 
 // One Schelling
@@ -180,91 +181,98 @@ bool do_one_step(const Grid& G, std::vector<uint8_t> & state, const Params& P, s
         std::shuffle(unhappy_agents.begin(), unhappy_agents.end(), rng);
     }
     for (int agent_idx : unhappy_agents) {
-        double old_u = local_same_fraction(G, state, agent_idx);
+        int best_dist = std::numeric_limits<int>::max();
+        std::vector<int> best_vacancies;
+        best_vacancies.reserve(8);
 
-        std::vector<int> improving_vacancies;
-        improving_vacancies.reserve(vacancies.size());
-
-        uint8_t t = state[agent_idx];
         for (int v : vacancies) {
-            if (v == agent_idx) continue; // skip current location
-
             // try move agent to vacancy v
             std::swap(state[agent_idx], state[v]);
-            double new_u = local_same_fraction(G, state, v);
+            bool satisfactory = is_happy(G, state, v, P.tau);
             std::swap(state[agent_idx], state[v]); // swap back
 
-            if (new_u > old_u) {
-                    improving_vacancies.push_back(v);
+            if (!satisfactory) continue;
+            int d = manhattan_distance(G, agent_idx, v);
+            if (d < best_dist) {
+                best_dist = d;
+                best_vacancies.clear();
+                best_vacancies.push_back(v);
+            } else if (d == best_dist) {
+                best_vacancies.push_back(v);
             }
         }
-        if (!improving_vacancies.empty()) {
-            std::uniform_int_distribution<int> dist(0, (int)improving_vacancies.size() - 1);
-            int chosen_v = improving_vacancies[dist(rng)];
+        if (!best_vacancies.empty()) {
+            std::uniform_int_distribution<int> dist(0, static_cast<int>(best_vacancies.size()) - 1);
+            int chosen_v = best_vacancies[dist(rng)];
             std::swap(state[agent_idx], state[chosen_v]);
-            return true; // one move made 
-        }    
+            return true; // one move made
+        }
     }
     return false; // no unhappy agent found any legal improving move
 }
 
+bool is_absorbing_state(const Grid& G,
+                        const std::vector<uint8_t>& state,
+                        const Params& P) {
+    std::vector<uint8_t> probe = state;
+    std::mt19937 dummy_rng(123456789); // deterministic probe RNG
+    return !do_one_step(G, probe, P, dummy_rng);
+}
 // Main simulation loop for one run, with cycle detection
-RunStats simulate_one(const Grid& G, std::vector<uint8_t> state, const Params& P, std::mt19937& rng) {
+RunStats simulate_one(const Grid& G,
+                      std::vector<uint8_t> state,
+                      const Params& P,
+                      std::mt19937& rng) {
     RunStats R;
-    R.initial_satisfaction = mean_satisfaction(G, state);
-    R.initial_segregation = segregation_index(G, state);
+    const int H = P.max_steps;
 
-    std::unordered_set<uint64_t> seen;
-    seen.reserve((size_t)std::min(P.max_steps, 50000)); // limit memory usage for cycle detection
-    for (int step = 0; step < P.max_steps; ++step) {
-        uint64_t h = hash_state(state); // hash before move
-        if (seen.find(h) != seen.end()) {
-            R.cycle_detected = true;
-            R.steps = step;
-            R.final_satisfaction = mean_satisfaction(G, state);
-            R.final_segregation = segregation_index(G, state);
-            return R;
-        }
-        seen.insert(h);
+    // Interpretation:
+    // X_0 = initial state
+    // after 1 successful move -> X_1
+    // after 2 successful moves -> X_2
+    // ...
+    // after k successful moves -> X_k
 
+    for (int t = 0; t < H; ++t) {
         bool moved = do_one_step(G, state, P, rng);
+
         if (!moved) {
-            R.absorbed = true;
-            R.steps = step;
-            R.final_satisfaction = mean_satisfaction(G, state);
-            R.final_segregation = segregation_index(G, state);
+            // Current state is absorbing, so T_abs = t
+            R.absorbed_by_H = true;
+            R.T_abs = t;
+            R.tau_H = t;
+            R.S_stop_H = segregation_score(G, state);
             return R;
         }
     }
-    // Reached step cap without absorption or cycle
-    R.steps = P.max_steps;
-    R.final_satisfaction = mean_satisfaction(G, state);
-    R.final_segregation = segregation_index(G, state);
+
+    // We have simulated exactly up to X_H.
+    // Need to check whether absorption occurs exactly at time H.
+    if (is_absorbing_state(G, state, P)) {
+        R.absorbed_by_H = true;
+        R.T_abs = H;
+    } else {
+        R.absorbed_by_H = false;
+        R.T_abs = -1; // means T_abs > H in the truncated sense
+    }
+
+    R.tau_H = H;
+    R.S_stop_H = segregation_score(G, state);
     return R;
 }
 
-// Aggregate results and define ``work well'' criteria ? (this is somewhat arbitrary, but we can say a run "works well" if it reaches a good level of segregation within a reasonable number of steps without getting stuck in a cycle)
-bool is_good_outcome(const RunStats & R, const Params & P) {
-    return R.absorbed && R.steps >= P.min_good_steps && R.final_segregation >= P.min_good_segregation;
-}
-
-void add_run(AggregateStats& A, const RunStats& R, const Params& P) {
-    A.total_runs++;
-    if (R.absorbed) A.absorbed_runs++;
-    if (R.cycle_detected) A.cycle_runs++;
-    if (is_good_outcome(R, P)) A.good_runs++;
-
-    // Update means using incremental formula
-    A.mean_steps += R.steps;
-    A.mean_final_satisfaction += R.final_satisfaction;
-    A.mean_final_segregation += R.final_segregation;
+void add_run(AggregateStats& A, const RunStats& R) {
+    ++A.total_runs;
+    A.p_abs_H += (R.absorbed_by_H ? 1.0 : 0.0);
+    A.tau_H += static_cast<double>(R.tau_H);
+    A.s_H += R.S_stop_H;
 }
 
 void finalize_aggregate(AggregateStats& A) {
     if (A.total_runs == 0) return;
-    A.mean_steps /= A.total_runs;
-    A.mean_final_satisfaction /= A.total_runs;
-    A.mean_final_segregation /= A.total_runs;
+    A.p_abs_H /= A.total_runs;
+    A.tau_H   /= A.total_runs;
+    A.s_H     /= A.total_runs;
 }
 
 // Parameter point in the phase sweep
@@ -279,29 +287,34 @@ AggregateStats run_experiment_at_fraction(Params P) {
         thread_id = omp_get_thread_num();
         #endif
 
-        std::mt19937 rng(P.seed + 1009 * thread_id + 7919 + (int)(1000 * P.a_frac) + (int)(10000 * P.vacancy_frac)); // unique seed per thread and parameter point
+        std::mt19937 rng(P.seed + 1009 * thread_id + 7919 + static_cast<int>(1000 * P.a_frac) + static_cast<int>(10000 * P.vacancy_frac)+ static_cast<int>(100000 * P.rows *1000 + P.cols)); // unique seed per thread and parameter point
         AggregateStats local;
     
         #pragma omp for
         for (int rep = 0; rep < P.repetitions; ++rep) {
             auto state = random_initial_state(P, rng);
             RunStats R = simulate_one(G, state, P, rng);
-            add_run(local, R, P);
+            add_run(local, R);
         }
 
         #pragma omp critical
         {
             total.total_runs += local.total_runs;
-            total.absorbed_runs += local.absorbed_runs;
-            total.cycle_runs += local.cycle_runs;
-            total.good_runs += local.good_runs;
-            total.mean_steps += local.mean_steps;
-            total.mean_final_satisfaction += local.mean_final_satisfaction; 
-            total.mean_final_segregation += local.mean_final_segregation; 
+            total.p_abs_H += local.p_abs_H;
+            total.tau_H += local.tau_H;
+            total.s_H += local.s_H;
         }
     }
     finalize_aggregate(total);
     return total;
+}
+
+std::vector<double> make_horizon_multipliers() {
+    std::vector<double> ks;
+    for (int j = 1; j <= 10; ++j) {
+        ks.push_back(0.1 * j);   // 0.1, 0.2, ..., 1.0
+    }
+    return ks;
 }
 
 int main() {
@@ -310,48 +323,93 @@ int main() {
     P.cols = 20;
     P.N = P.rows * P.cols;
     P.vacancy_frac = 0.1;
-    P.tau = 1.0/3.0;
+    P.tau = 1.0 / 3.0;
     P.repetitions = 2000;
-    P.max_steps = 100000;
+
+    auto horizon_ks = make_horizon_multipliers();
+
+    auto program_start = std::chrono::steady_clock::now();
+    long long total_simulation_runs = 0;
 
     std::ofstream fout("phase_sweep.csv");
-    fout << "a_frac, b_frac, vacancy_frac, absorbed_prob, cycle_prob, good_prob, "
-            "mean_steps, mean_final_satisfaction, mean_final_segregation\n";
-    for (double v = 0.00; v <= 1; v += 0.01){
-        P.vacancy_frac = v;
-        for (double a = 0.00; a<= 1 - P.vacancy_frac; a += 0.01) {
-            if (a+ P.vacancy_frac > 1.0) break; // ensure valid parameters
-            P.a_frac = a;
+    fout << "row,col,N,a_frac,b_frac,vacancy_frac,k,H,p_abs_H,tau_H,s_H\n";
 
-            Counts C = proportions_to_counts(P);
-            if (C.Qb < 0) continue; // skip invalid parameter points
+    for (int row = 3; row <= 20; ++row) {
+        for (int col = row; col <= 20; ++col) {
+            P.rows = row;
+            P.cols = col;
+            P.N = P.rows * P.cols;
 
-            double b = 1.0 - P.vacancy_frac - P.a_frac;
-            auto A = run_experiment_at_fraction(P);
+            for (double v = 0.00; v <= 1.0000001; v += 0.01) {
+                P.vacancy_frac = v;
 
-            double absorbed_prob = (double)A.absorbed_runs / A.total_runs;
-            double cycle_prob = (double)A.cycle_runs / A.total_runs;
-            double good_prob = (double)A.good_runs / A.total_runs;
+                for (double a = 0.00; a <= 1.0 - P.vacancy_frac + 1e-12; a += 0.01) {
+                    if (a + P.vacancy_frac > 1.0 + 1e-12) break;
+                    P.a_frac = a;
 
-            std::cout << "a=" << a
-                    << "b=" << b
-                    << "vacancy_frac=" << P.vacancy_frac
-                    << "absorbed_prob=" << absorbed_prob
-                    << "good_prob=" << good_prob
-                    << "mean_steps=" << A.mean_steps
-                    << "\n";
-            fout << a << "," 
-                << b << "," 
-                << P.vacancy_frac << ","
-                << absorbed_prob << ","
-                << cycle_prob << ","
-                << good_prob << ","
-                << A.mean_steps << ","
-                << A.mean_final_satisfaction << ","
-                << A.mean_final_segregation << "\n";
+                    Counts C;
+                    try {
+                        C = proportions_to_counts(P);
+                    } catch (...) {
+                        continue;
+                    }
+
+                    if (C.Qb < 0) continue;
+
+                    double b = 1.0 - P.vacancy_frac - P.a_frac;
+
+                    // New sweep over k, where H = ceil(kN)
+                    for (double k : horizon_ks) {
+                        P.max_steps = std::max(1, static_cast<int>(std::ceil(k * P.N)));
+
+                        AggregateStats A = run_experiment_at_fraction(P);
+                        total_simulation_runs += A.total_runs;
+
+                        std::cout << "rows=" << row
+                                  << " cols=" << col
+                                  << " N=" << P.N
+                                  << " a=" << a
+                                  << " b=" << b
+                                  << " vacancy_frac=" << P.vacancy_frac
+                                  << " k=" << k
+                                  << " H=" << P.max_steps
+                                  << " p_abs_H=" << A.p_abs_H
+                                  << " tau_H=" << A.tau_H
+                                  << " s_H=" << A.s_H
+                                  << "\n";
+
+                        fout << row << ","
+                             << col << ","
+                             << P.N << ","
+                             << a << ","
+                             << b << ","
+                             << P.vacancy_frac << ","
+                             << k << ","
+                             << P.max_steps << ","
+                             << A.p_abs_H << ","
+                             << A.tau_H << ","
+                             << A.s_H << "\n";
+                    }
+                }
+            }
         }
     }
+
     fout.close();
+
+    auto program_end = std::chrono::steady_clock::now();
+    double elapsed_s = std::chrono::duration<double>(program_end - program_start).count();
+    int total_seconds = static_cast<int>(std::lround(elapsed_s));
+    int hours = total_seconds / 3600;
+    int minutes = (total_seconds % 3600) / 60;
+    int seconds = total_seconds % 60;
+
+    std::cout << "Total simulation runs performed: " << total_simulation_runs << "\n";
+    std::cout << "Total wall time: "
+              << hours << "h "
+              << minutes << "m "
+              << seconds << "s\n";
+
     return 0;
 }
 
