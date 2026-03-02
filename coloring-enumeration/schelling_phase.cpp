@@ -414,4 +414,4 @@ int main() {
 }
 
 // Compile command
-// g++ -O3 -march=native -fopenmp -std=c++17 schelling_phase.cpp -o schelling_phase
+// g++15 -O3 -march=native -fopenmp -std=c++17 schelling_phase.cpp -o schelling_phase
